@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
 
 # Global Response Normalization module from ConvNeXt V2
 class GRN(nn.Module):
@@ -237,3 +238,42 @@ if __name__ == "__main__":
     # Save the visualization to a file (helpful for non-interactive environments)
     plt.savefig("reconstruction_examples.png")
     plt.show()
+
+
+def evaluate_top1(model, dataloader, device):
+    model.eval()
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in dataloader:
+            images, labels = images.to(device), labels.to(device)
+            B, _, H, W = images.shape
+            patch_H, patch_W = H // 4, W // 4
+            mask = GRM(B, patch_H, patch_W, 0.5, device)  
+
+            reconstructed = model(images, mask) 
+
+            with torch.no_grad():
+                feats = model.stem(images)
+                for block in model.enc_blocks:
+                    feats = block(feats)
+                    feats = feats * (1 - mask)
+                pooled = F.adaptive_avg_pool2d(feats, (1, 1)).view(B, -1)
+                classifier = torch.nn.Linear(pooled.size(1), 10).to(device)
+                preds = classifier(pooled).argmax(dim=1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    return accuracy_score(all_labels, all_preds)
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CNA(dim=32, enc_blocks=2).to(device)
+    transform = transforms.ToTensor()
+    test_set = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transform)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=64, shuffle=False, num_workers=2)
+
+    top1_acc = evaluate_top1(model, test_loader, device)
+    print(f"Top-1 Accuracy on CIFAR-10: {top1_acc * 100:.2f}%")
