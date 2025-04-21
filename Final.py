@@ -135,9 +135,9 @@ def GRM(batch_size, patch_H, patch_W, mask_ratio, device):
 
 if __name__ == "__main__":
     # Hyperparameters for training
-    num_epochs = 10
+    num_epochs = 30
     batch_size = 64
-    mask_ratio = 0.5  # 50% of patches will be masked
+    mask_ratio = 0.4  # 40% of patches will be masked
     learning_rate = 1e-3
 
     # Explanation (in comments):
@@ -239,34 +239,61 @@ if __name__ == "__main__":
     plt.savefig("reconstruction_examples.png")
     plt.show()
 
+def train_classifier(encoder, train_loader, device, epochs=5, lr=1e-3):
+    encoder.eval()  # Freeze encoder
+    classifier = nn.Linear(encoder.stem.out_channels, 10).to(device)
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
 
-def evaluate_top1(model, dataloader, device):
-    model.eval()
+    for epoch in range(epochs):
+        total_loss = 0
+        total_correct = 0
+        total_samples = 0
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            with torch.no_grad():
+                feats = encoder.stem(images)
+                for block in encoder.enc_blocks:
+                    feats = block(feats)
+                pooled = F.adaptive_avg_pool2d(feats, (1, 1)).view(images.size(0), -1)
+
+            preds = classifier(pooled)
+            loss = criterion(preds, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item() * images.size(0)
+            total_correct += (preds.argmax(1) == labels).sum().item()
+            total_samples += images.size(0)
+
+        acc = total_correct / total_samples
+        print(f"Epoch {epoch+1}, Classifier Loss: {total_loss/total_samples:.4f}, Accuracy: {acc:.4f}")
+
+    return classifier
+
+
+def evaluate_top1(encoder, classifier, dataloader, device):
+    encoder.eval()
+    classifier.eval()
     all_preds = []
     all_labels = []
 
     with torch.no_grad():
         for images, labels in dataloader:
             images, labels = images.to(device), labels.to(device)
-            B, _, H, W = images.shape
-            patch_H, patch_W = H // 4, W // 4
-            mask = GRM(B, patch_H, patch_W, 0.5, device)  
-
-            reconstructed = model(images, mask) 
-
-            with torch.no_grad():
-                feats = model.stem(images)
-                for block in model.enc_blocks:
-                    feats = block(feats)
-                    feats = feats * (1 - mask)
-                pooled = F.adaptive_avg_pool2d(feats, (1, 1)).view(B, -1)
-                classifier = torch.nn.Linear(pooled.size(1), 10).to(device)
-                preds = classifier(pooled).argmax(dim=1)
+            feats = encoder.stem(images)
+            for block in encoder.enc_blocks:
+                feats = block(feats)
+            pooled = F.adaptive_avg_pool2d(feats, (1, 1)).view(images.size(0), -1)
+            preds = classifier(pooled).argmax(dim=1)
 
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
     return accuracy_score(all_labels, all_preds)
+
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -275,5 +302,8 @@ if __name__ == "__main__":
     test_set = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transform)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=64, shuffle=False, num_workers=2)
 
-    top1_acc = evaluate_top1(model, test_loader, device)
+    classifier = train_classifier(model, train_loader, device, epochs=10)
+
+
+    top1_acc = evaluate_top1(model, classifier, test_loader, device)
     print(f"Top-1 Accuracy on CIFAR-10: {top1_acc * 100:.2f}%")
